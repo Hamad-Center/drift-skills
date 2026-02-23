@@ -134,7 +134,7 @@ drift-sync
 
 - **Next session items** — remaining AC items, TODOs/FIXMEs found in code, tests needed, known edge cases
 
-**Phase 5 — Write `CONTEXT.md`.** A living context document in the repo root (see [What You Get](#what-you-get)).
+**Phase 5 — Update `CONTEXT.md`.** This is the persistent memory layer. Drift writes (or updates) `CONTEXT.md` in the repo root with the full analysis from this session. If a `CONTEXT.md` already exists from a previous sync, the current "Latest Session" gets demoted to the "Previous Sessions" section and the new analysis takes its place. Up to 4 previous sessions are kept — older ones roll off. The result is a single file that always contains the current state of the project plus recent history, so anyone (or any AI assistant) can read it and immediately understand what's been happening.
 
 **Phase 6 — Save session history.** Appends structured JSON to `.drift/sessions.*.json` for future reference.
 
@@ -184,12 +184,47 @@ Every `drift-sync` produces four outputs:
 
 ### `CONTEXT.md` — Living context document
 
-Written to the repo root. This is the file that solves the "what happened" problem. It contains:
+Written to the repo root. This is the file that solves the "I closed my laptop and forgot everything" problem.
 
-- The full analysis from your latest session (what was built, decisions, drift, code review, next steps)
-- Summarized history of up to 4 previous sessions
+**What's in it:**
 
-When you open your laptop Monday morning, or when a teammate picks up your branch, or when a new AI conversation starts with zero memory — `CONTEXT.md` is the answer to "what's going on in this repo." It's committed to git and shared with the team.
+Every time you run `drift-sync`, CONTEXT.md is updated with the full analysis from that session — what was built, every technical decision and its rating, what drifted from the ticket's AC, architecture impact, code review findings (CONCERN and ISSUE only), and what needs to happen next.
+
+**How it updates over time:**
+
+CONTEXT.md isn't a log that grows forever. It's a rolling document:
+
+- The **"Latest Session"** section always contains the full analysis from your most recent sync
+- When you sync again, the previous latest session gets moved down to **"Previous Sessions"** as a shorter summary
+- Up to **4 previous sessions** are kept. Older sessions roll off the bottom
+
+So after three syncs across tickets BAS-10, BAS-11, and BAS-12, your CONTEXT.md would look like:
+
+```
+# Project Context
+
+> Last updated: 2025-02-16T14:00:00Z
+
+# Latest Session
+
+## Session: 2025-02-16 (BAS-12)
+  [full analysis — what was built, decisions, drift, code review, next steps]
+
+# Previous Sessions
+
+## Session: 2025-02-15 (BAS-11)
+  [summarized — what was built, key decisions, what was left]
+
+## Session: 2025-02-14 (BAS-10)
+  [summarized — what was built, key decisions, what was left]
+```
+
+**Why this matters:**
+
+- You open your laptop Monday morning — read CONTEXT.md instead of doing archaeology on your own code
+- A teammate picks up your branch — they read CONTEXT.md and know what's done, what's not, and what decisions were made
+- A new AI conversation starts with zero memory — CONTEXT.md gives it full project context immediately
+- It's committed to git and shared with the team — it survives laptop closes, tool switches, and AI memory resets
 
 ### `<ticket>-report.md` — Session report
 
