@@ -10,25 +10,33 @@ AI-assisted development is fast. Dangerously fast. You open a Jira ticket, start
 
 Five things go wrong repeatedly:
 
-1. **Scope creep goes unnoticed** — you build features nobody asked for because the AI kept suggesting "while we're here" improvements
-2. **Acceptance criteria get forgotten** — the ticket says one thing, your code says another, nobody knows until QA
-3. **Context evaporates between sessions** — you close the laptop and lose all the decisions, trade-offs, and next steps that weren't committed
-4. **Hacky shortcuts slip through** — the AI picks the path of least resistance, not the right architecture
-5. **Progress is impossible to track** — commits say "fix" and "wip", the PM has no idea what's actually done
+1. **Scope creep goes unnoticed** — you build features nobody asked for because the AI kept suggesting "while we're here" improvements. Drift catches this by comparing what you built against the ticket's written acceptance criteria and flagging anything extra as a scope addition.
 
-Drift fixes all five.
+2. **Acceptance criteria get forgotten** — the ticket says one thing, your code says another, nobody knows until QA. Drift fetches the AC from Jira and uses it as the checklist for every analysis, so it's always visible.
+
+3. **Context evaporates between sessions** — you close the laptop and lose all the decisions, trade-offs, and next steps that weren't committed. Drift writes `CONTEXT.md` to the repo — a rolling document that persists everything across sessions, tool switches, and AI memory resets.
+
+4. **Hacky shortcuts slip through** — the AI picks the path of least resistance, not the right architecture. Drift runs a code review on every sync, checking for security gaps, hacky patterns, and architecture concerns.
+
+5. **Progress is impossible to track** — commits say "fix" and "wip", the PM has no idea what's actually done. Drift posts a structured comment to the Jira ticket with concrete progress (e.g., "3 of 5 AC items done"), what was built, and what's next.
 
 ---
 
 ## What Is Drift
 
-Drift is a set of AI assistant rules that run inside your existing tools — Claude Code, Cursor, or Codex. Not a separate app, not a CLI tool, not a CI plugin. You don't change your workflow. You just get three new commands:
+Drift is a set of instruction files that your AI assistant follows. You copy them into your tool's skills/rules directory, and they become available as commands. The AI assistant does all the work — reading files, running git commands, calling the Jira API, writing the analysis — by following the instructions in the skill files.
 
-```
-drift-start   →  start tracking a session against a Jira ticket
-drift-status  →  see what changed so far (read-only, writes nothing)
-drift-sync    →  analyze everything, review the code, update Jira
-```
+There's nothing to install, no dependencies, no runtime. Just markdown files that tell your AI assistant how to track sessions.
+
+Three commands:
+
+| Command | What it does | How you invoke it |
+|---|---|---|
+| `drift-start` | Start tracking a session against a Jira ticket | Claude Code: `/drift-start BAS-10` · Cursor: `drift-start BAS-10` · Codex: `drift-start BAS-10` |
+| `drift-status` | See what changed so far (read-only, writes nothing) | Claude Code: `/drift-status` · Cursor: `drift-status` · Codex: `drift-status` |
+| `drift-sync` | Analyze everything, review the code, update Jira | Claude Code: `/drift-sync` · Cursor: `drift-sync` · Codex: `drift-sync` |
+
+In Claude Code these are slash commands (`/drift-start`). In Cursor you type the name in agent mode chat (`drift-start BAS-10`). In Codex you use `/skills` or `$` mentions. The behavior is identical across all three.
 
 ---
 
@@ -42,22 +50,24 @@ Before you write any code, tell Drift what ticket you're working on:
 drift-start BAS-10
 ```
 
-That's it. Just the ticket ID.
+That's it. Just the ticket ID. The ticket ID is required — Drift will ask for one if you don't provide it.
 
 **What happens behind the scenes:**
 - Drift saves your current git SHA, branch, and timestamp as the starting snapshot
-- If Jira is configured, it **automatically fetches the ticket's title, description, and acceptance criteria** from Jira — so it knows exactly what you're supposed to build
-- The acceptance criteria become the checklist that everything is measured against later
+- If Jira is configured, it fetches the ticket's **summary and description** to use as context for the session
+- This context is stored as the session's `plannedWork` — the baseline for measuring drift later
 
-You can optionally add a description if you want to override or supplement what's in Jira:
+You can optionally add your own description if you want to be more specific than what's in Jira:
 
 ```
 drift-start BAS-10 implement JWT authentication
 ```
 
-But if Jira is connected, you usually don't need to — Drift already has the full ticket context.
+If you provide a description, Drift uses that as the `plannedWork` instead of fetching from Jira. If you provide just the ticket ID and Jira is connected, it pulls the ticket details automatically. If Jira isn't configured, just add a short description of what you plan to do.
 
-**First time running Drift?** It creates a `.drift/` folder in your repo (automatically gitignored) to store session data and credentials. If Jira isn't configured yet, it asks for your credentials interactively and saves them locally.
+**Starting a new session when one is already active?** Drift shows you the current session and asks if you want to replace it. If you say yes, the old session is removed from the active session list and the new one takes its place. (The old session's analysis is still preserved in `CONTEXT.md` and `sessions.*.json` if you ran `drift-sync` before starting a new session.)
+
+**First time running Drift?** It creates a `.drift/` folder in your repo (automatically added to `.gitignore`) to store session data and credentials. If Jira isn't configured yet, it offers to collect your credentials interactively and saves them locally in `.drift/jira.json` (never committed).
 
 ---
 
@@ -90,9 +100,15 @@ Changes since session start:
   backend/router.py        | 15 ++-
 
 Uncommitted: yes - 2 files
+
+Recent sessions (Claude Code):
+  1. 2025-02-13 — BAS-09 — Scaffolded dashboard with full folder structure
+  2. 2025-02-12 — BAS-08 — Added user model and async database layer
 ```
 
-It also shows recent session history from all tools (Claude Code, Cursor, Codex, CLI) so you can see what was done in previous sessions regardless of which tool was used.
+It also shows recent session history from previous analyses so you can see what was done in earlier sessions.
+
+At the end, it suggests next steps — like running `drift-sync` or checking the last report file if one exists.
 
 ---
 
@@ -104,15 +120,17 @@ This is the core of Drift. Run it when you're ready to review what you've built 
 drift-sync
 ```
 
-**What actually happens (8 phases):**
+**What actually happens:**
 
 **Phase 1 — Read the session.** Drift loads your starting snapshot (SHA, ticket, planned work) from `.drift/config.json`.
 
-**Phase 1b — Fetch the ticket from Jira.** Drift calls the Jira API and pulls the ticket's current acceptance criteria. This becomes the authoritative checklist — not your memory of what the ticket said, but the actual written AC.
+**Phase 1b — Fetch the ticket from Jira.** Drift calls the Jira API and pulls the ticket's current acceptance criteria. This is the deep fetch — it looks for AC in three places: a custom "acceptance criteria" field, a checklist in the ticket description, or subtask summaries. This AC becomes the authoritative checklist for the analysis. *(Skipped if `--no-push` or `--no-jira` flag is set.)*
+
+> **Note:** This is different from the `drift-start` fetch. `drift-start` only grabs the ticket's summary and description as a fallback for your planned work description. `drift-sync` does the thorough AC extraction that drives the progress and drift measurements.
 
 **Phase 2 — Gather everything from git.** Full diff (not truncated), all commit messages, list of added/modified/deleted files, staged and unstaged changes. Everything since your starting SHA.
 
-**Phase 3 — Read every changed file in full.** This is the key difference from other tools. Drift doesn't just look at diff chunks — it reads the complete content of every changed file. For architecturally significant changes, it also reads related unchanged files for context (e.g., if you added a new route, it reads the router setup to understand how it fits). Binary files are skipped. Files over 1000 lines are skipped. If there are 100+ changed files, it reads the top 20 by lines changed.
+**Phase 3 — Read every changed file in full.** This is the key difference from other tools. Drift doesn't just look at diff chunks — it reads the complete content of every changed file so the analysis understands each file in context, not just the lines that changed. For architecturally significant changes, it also reads related unchanged files for context (e.g., if you added a new route, it reads the router setup to understand how it fits). For files with more than 200 lines changed, it also examines the per-file diff individually for extra detail. Binary files are skipped. Files over 1000 lines are skipped (noted in the summary). If there are 100+ changed files, it reads the top 20 by lines changed and notes the rest.
 
 **Phase 4 — Produce the analysis.** Using the full file contents, the complete diff, and the ticket's acceptance criteria, Drift produces a structured analysis:
 
@@ -132,22 +150,22 @@ drift-sync
 
 - **Architecture impact** — new patterns, new dependencies, API surface changes
 
-- **Next session items** — remaining AC items, TODOs/FIXMEs found in code, tests needed, known edge cases
+- **Next session items** — remaining AC items, TODOs/FIXMEs/HACKs found in code (scanned automatically), tests needed, known edge cases
 
-**Phase 5 — Update `CONTEXT.md`.** This is the persistent memory layer. Drift writes (or updates) `CONTEXT.md` in the repo root with the full analysis from this session. If a `CONTEXT.md` already exists from a previous sync, the current "Latest Session" gets demoted to the "Previous Sessions" section and the new analysis takes its place. Up to 4 previous sessions are kept — older ones roll off. The result is a single file that always contains the current state of the project plus recent history, so anyone (or any AI assistant) can read it and immediately understand what's been happening.
+**Phase 5 — Update `CONTEXT.md`.** This is the persistent memory layer. Drift writes (or updates) `CONTEXT.md` in the repo root with the full analysis from this session. If a `CONTEXT.md` already exists from a previous sync, the current "Latest Session" gets demoted to the "Previous Sessions" section and the new analysis takes its place. Up to 4 previous sessions are kept — older ones roll off. (Older sessions are still in git history if you need them.) The result is a single file that always contains the current state of the project plus recent history, so anyone (or any AI assistant) can read it and immediately understand what's been happening.
 
-**Phase 6 — Save session history.** Appends structured JSON to `.drift/sessions.*.json` for future reference.
+**Phase 6 — Save session history.** Prepends a structured JSON entry to `.drift/sessions.claude.json` (or `sessions.cursor.json` / `sessions.codex.json` depending on which tool you're using). Newest entries first. Capped at 50 entries — oldest are trimmed when exceeded.
 
-**Phase 7 — Post to Jira.** Automatically posts a structured comment to the ticket so your PM sees progress without you writing anything:
+**Phase 7 — Post to Jira.** Automatically posts a structured comment to the ticket so your PM sees progress without you writing anything. *(Skipped if `--no-push` or `--no-jira` flag is set.)*
 
 ```
 Drift Session Summary:
 
-Progress: ~70% of this ticket's acceptance criteria
+Progress: 60% of this ticket's acceptance criteria (3 of 5 items)
 
 What was done:
 JWT auth implemented with login/register endpoints and token
-validation middleware. 3 of 5 AC items completed.
+validation middleware.
 
 Drift from plan:
 Added password reset endpoint not in AC — recommend separate ticket.
@@ -163,18 +181,54 @@ Blockers:
 - None
 ```
 
-**Phase 8 — Write the report.** Saves a human-readable report as `bas-10-report.md` (ticket ID in lowercase). Ready to paste into a PR description.
+**Phase 8 — Write the report.** Saves a human-readable report as `bas-10-report.md` (ticket ID in lowercase). This is the same analysis formatted as a standalone markdown document:
+
+```markdown
+# Drift Sync Report — BAS-10
+
+## What happened
+Implemented JWT authentication using python-jose with HS256 signing.
+Added login and register endpoints to router.py, middleware for token
+validation in middleware.py, and updated config.py with JWT settings.
+
+## Decisions
+- SOUND: HS256 over RS256 — simpler for single-service architecture
+- ACCEPTABLE: Token in Authorization header vs httpOnly cookie
+
+## Drift from plan
+- Added: password reset endpoint (not in AC — scope creep)
+- Missing: token refresh endpoint (AC item #4, not started)
+
+## Code review
+3 clean | 1 concern | 1 issue
+- CONCERN: JWT secret has hardcoded fallback (config.py:13)
+- ISSUE: Login endpoint has no rate limiting (router.py:41)
+Overall: Solid auth foundation. Rate limiting is the critical fix.
+
+## For next session
+- Implement token refresh endpoint (AC item #4)
+- Add rate limiting to /login
+- Move password reset to its own ticket
+
+---
+Files changed: 14 | Commits: 8 | Files analyzed: 12
+CONTEXT.md updated | Jira: comment posted to BAS-10
+```
+
+Ready to paste into a PR description or share with the team.
+
+**Important:** `drift-sync` does **not** clear the active session. You can run it multiple times on the same session — useful if you keep coding after a sync and want to re-analyze. The session only ends when you run `drift-start` for a new ticket.
 
 ---
 
 ### Flags
 
-```
-drift-sync --no-push    # run full analysis but don't post the Jira comment
-drift-sync --no-jira    # skip all Jira integration (no fetch, no post)
-```
+| Flag | What it does |
+|---|---|
+| `--no-push` | Skip Jira integration entirely — no ticket fetch, no comment posted. The analysis uses your `drift-start` description instead of ticket AC. You still get CONTEXT.md, the report, and session JSON. |
+| `--no-jira` | Same as `--no-push` — skip all Jira integration (no fetch, no post). |
 
-Use `--no-push` when you want the analysis but aren't ready to update the ticket. Use `--no-jira` when working without Jira entirely — the analysis will use your `drift-start` description instead of ticket AC.
+Use either flag when you want the analysis but don't need Jira involvement — e.g., working offline, tickets aren't set up yet, or you're not ready to post.
 
 ---
 
@@ -184,11 +238,11 @@ Every `drift-sync` produces four outputs:
 
 ### `CONTEXT.md` — Living context document
 
-Written to the repo root. This is the file that solves the "I closed my laptop and forgot everything" problem.
+Written to the repo root. **This is committed to git and shared with the team.** This is the file that solves the "I closed my laptop and forgot everything" problem.
 
 **What's in it:**
 
-Every time you run `drift-sync`, CONTEXT.md is updated with the full analysis from that session — what was built, every technical decision and its rating, what drifted from the ticket's AC, architecture impact, code review findings (CONCERN and ISSUE only), and what needs to happen next.
+Every time you run `drift-sync`, CONTEXT.md is updated with the full analysis from that session — what was built, every technical decision and its rating, what drifted from the ticket's AC, architecture impact, code review findings (CONCERN and ISSUE only — CLEAN findings are omitted to keep it concise across sessions), and what needs to happen next.
 
 **How it updates over time:**
 
@@ -196,7 +250,7 @@ CONTEXT.md isn't a log that grows forever. It's a rolling document:
 
 - The **"Latest Session"** section always contains the full analysis from your most recent sync
 - When you sync again, the previous latest session gets moved down to **"Previous Sessions"** as a shorter summary
-- Up to **4 previous sessions** are kept. Older sessions roll off the bottom
+- Up to **4 previous sessions** are kept. Older sessions roll off the bottom (but are still in git history if you ever need them)
 
 So after three syncs across tickets BAS-10, BAS-11, and BAS-12, your CONTEXT.md would look like:
 
@@ -208,15 +262,36 @@ So after three syncs across tickets BAS-10, BAS-11, and BAS-12, your CONTEXT.md 
 # Latest Session
 
 ## Session: 2025-02-16 (BAS-12)
-  [full analysis — what was built, decisions, drift, code review, next steps]
+
+**What happened:**
+Added dashboard filtering and search. Created FilterBar component
+in components/FilterBar.tsx, added search API endpoint in api/search.py...
+
+**Decisions made:**
+- SOUND: Client-side filtering for small datasets, server-side for search...
+
+**Drift from plan:**
+- Missing: export to CSV (AC item #3, not started)
+
+**Code review:**
+- CONCERN: Search endpoint has no pagination (api/search.py:45)
+Overall: Clean implementation. Add pagination before dataset grows.
+
+**For next session:**
+- Implement CSV export (AC item #3)
+- Add pagination to search endpoint
 
 # Previous Sessions
 
 ## Session: 2025-02-15 (BAS-11)
-  [summarized — what was built, key decisions, what was left]
+  What happened: Implemented user auth with JWT tokens...
+  Key decisions: HS256 signing, token in Authorization header...
+  Left off: token refresh endpoint, rate limiting on /login
 
 ## Session: 2025-02-14 (BAS-10)
-  [summarized — what was built, key decisions, what was left]
+  What happened: Scaffolded FastAPI project structure...
+  Key decisions: async SQLAlchemy, Pydantic v2...
+  Left off: all endpoints still stubs
 ```
 
 **Why this matters:**
@@ -224,28 +299,30 @@ So after three syncs across tickets BAS-10, BAS-11, and BAS-12, your CONTEXT.md 
 - You open your laptop Monday morning — read CONTEXT.md instead of doing archaeology on your own code
 - A teammate picks up your branch — they read CONTEXT.md and know what's done, what's not, and what decisions were made
 - A new AI conversation starts with zero memory — CONTEXT.md gives it full project context immediately
-- It's committed to git and shared with the team — it survives laptop closes, tool switches, and AI memory resets
+- It's committed to git — it survives laptop closes, tool switches, and AI memory resets
 
 ### `<ticket>-report.md` — Session report
 
-Written to the repo root (e.g., `bas-10-report.md`). A clean, human-readable version of the analysis. Overwritten every sync. Useful as:
+Written to the repo root (e.g., `bas-10-report.md`). A clean, human-readable version of the full analysis including all code review findings (CLEAN, CONCERN, and ISSUE). Overwritten each time you sync the same ticket. Report files from previous tickets are not deleted — if you synced BAS-10 and then BAS-11, both `bas-10-report.md` and `bas-11-report.md` will exist.
+
+Useful as:
 - A PR description (paste it in)
 - An async standup update
 - A handoff document
 
 ### Jira comment — Automatic ticket update
 
-Posted directly to the Jira ticket. Your PM gets: progress percentage (completed AC items / total), what was built, what drifted from the plan, code quality summary, and next steps. They never have to ask "how's the ticket going" — the answer is already on the ticket.
+Posted directly to the Jira ticket. Your PM gets: progress percentage (completed AC items / total AC items), what was built, what drifted from the plan, code quality summary, and next steps. They never have to ask "how's the ticket going" — the answer is already on the ticket.
 
 ### `sessions.*.json` — Structured history
 
-Saved in `.drift/` (gitignored). Machine-readable JSON with every analysis run. Up to 50 entries. Includes the full analysis data: summary, decisions, drift, code review findings, file counts. Useful for tooling, auditing, or dashboards.
+Saved in `.drift/` (gitignored, never committed). Machine-readable JSON with every analysis run. Newest entries first. Up to 50 entries per tool — oldest are trimmed when exceeded. Each entry includes: summary, decisions, drift, architecture impact, next session items, code review findings with counts, files analyzed, and whether the Jira comment was posted. Each tool writes to its own file (`sessions.claude.json`, `sessions.cursor.json`, `sessions.codex.json`).
 
 ---
 
 ## Code Review
 
-Every `drift-sync` reviews all changed files. This isn't a separate step — it's built into the analysis. Because Drift reads the full content of every changed file (not just diff chunks), it can evaluate code in context.
+Every `drift-sync` reviews all changed files. This isn't a separate step — it's built into the analysis. Because Drift reads the full content of every changed file (not just diff chunks), it can evaluate code in context — understanding how a function fits in its module, whether patterns are used consistently, and whether new code aligns with the existing architecture.
 
 ### Signal labels
 
@@ -268,9 +345,9 @@ Each finding includes a file path, line number, and a specific recommendation. E
 
 ### Where review findings appear
 
-- **`CONTEXT.md`** — only CONCERN and ISSUE findings (keeps the document concise across sessions)
-- **`<ticket>-report.md`** — all findings including CLEAN (the full picture)
-- **Jira comment** — summary count only (e.g., "1 concern, 1 issue: rate limiting missing")
+- **`CONTEXT.md`** — CONCERN and ISSUE findings only. CLEAN findings are omitted to keep the document concise as sessions accumulate — you don't need to scroll past 20 "this is fine" entries to find the two things that matter.
+- **`<ticket>-report.md`** — all findings including CLEAN. This is the full picture for the current session.
+- **Jira comment** — summary count only (e.g., "1 concern, 1 issue: rate limiting missing"). The ticket doesn't need the full review — just the signal.
 
 ---
 
@@ -288,7 +365,9 @@ Drift is strict about what counts as "drift" and how progress is measured. This 
 
 - **Future ticket work is out of scope.** If you notice something for another ticket, it goes under "future work (out of scope)" — never mixed into this session's progress.
 
-- **Progress % is concrete.** Completed AC items divided by total AC items. Nothing implied, nothing estimated.
+- **Progress % is concrete.** Completed AC items divided by total AC items. 3 of 5 done = 60%. Nothing implied, nothing estimated.
+
+**What if the ticket's AC is vague or missing?** If Drift can't find clear acceptance criteria in the ticket (no AC field, no checklist in the description, no subtasks), it falls back to the `plannedWork` description from your `drift-start` command. The analysis will still run, but progress tracking will be less precise since there's no concrete checklist to measure against.
 
 ---
 
@@ -298,14 +377,15 @@ Drift is strict about what counts as "drift" and how progress is measured. This 
 
 Drift talks to Jira in two directions:
 
-**Reading (on `drift-start` and `drift-sync`):**
-Fetches the ticket's summary, description, status, and acceptance criteria. The AC is found in this order:
-1. A custom field containing "acceptance" in its name
-2. A checklist or bullet list in the description body
-3. Subtask summaries (if no AC field or description checklist exists)
+**Reading:**
+- On `drift-start` — fetches the ticket's **summary and description** as fallback context (only if you didn't provide your own description)
+- On `drift-sync` — fetches the ticket again with a **deep AC extraction**. Looks for acceptance criteria in three places:
+  1. A custom field containing "acceptance" in its name
+  2. A checklist or bullet list in the description body
+  3. Subtask summaries (if no AC field or description checklist exists)
 
-**Writing (on `drift-sync`):**
-Posts a structured comment to the ticket with progress, what was done, drift, code quality, next steps, and blockers.
+**Writing:**
+- On `drift-sync` — posts a structured comment to the ticket with progress, what was done, drift, code quality, next steps, and blockers
 
 ### Setting up credentials
 
@@ -322,9 +402,9 @@ Drift checks for credentials in this order (first complete set wins):
 | Priority | Source | Notes |
 |---|---|---|
 | 1 | Environment variables | `export JIRA_URL=...` `JIRA_EMAIL=...` `JIRA_TOKEN=...` |
-| 2 | `.env` in project root | Standard `KEY=value` format |
+| 2 | `.env` in project root | Standard `KEY=value` format (supports `export` prefix, quoted values, inline comments) |
 | 3 | `.drift/.env` | Drift-specific, keeps creds out of your main `.env` |
-| 4 | `~/.config/drift-nodejs/config.json` | Global config (shared with drift CLI if you use it) |
+| 4 | `~/.config/drift-nodejs/config.json` | Global config (shared with the [drift CLI](https://github.com/Hamad-Center/drift) if you use it) |
 | 5 | `.drift/jira.json` | Saved when you enter creds interactively |
 | 6 | Interactive prompt | Drift asks during `drift-start` or `drift-sync` if nothing else is found |
 
@@ -338,9 +418,19 @@ Drift works fine without Jira. Use `--no-jira` on sync, or just don't configure 
 
 ## Install
 
+First, clone this repo (or download the files):
+
+```bash
+git clone git@github.com:Hamad-Center/drift-skills.git
+cd drift-skills
+```
+
+Then copy the skill files for your tool:
+
 ### Claude Code
 
 ```bash
+mkdir -p ~/.claude/skills
 cp -r claude-code/* ~/.claude/skills/
 ```
 
@@ -355,6 +445,7 @@ Invoke with slash commands:
 ### Cursor
 
 ```bash
+mkdir -p ~/.cursor/rules
 cp cursor/* ~/.cursor/rules/
 ```
 
@@ -369,6 +460,7 @@ drift-sync --no-jira
 ### Codex
 
 ```bash
+mkdir -p ~/.agents/skills
 cp -r codex/* ~/.agents/skills/
 ```
 
@@ -379,7 +471,9 @@ drift-status
 drift-sync
 ```
 
-Each tool folder has its own README with detailed setup instructions and tool-specific usage notes.
+Each tool folder has its own README with detailed setup instructions and tool-specific notes.
+
+**Prerequisites:** Git (Drift uses git commands extensively). No other dependencies — the skill files are just instructions that your AI assistant follows.
 
 ---
 
@@ -395,7 +489,7 @@ All three versions share the same `.drift/` directory, `CONTEXT.md`, and Jira cr
 | `CONTEXT.md` — latest analysis | |
 | `<ticket>-report.md` — latest report | |
 
-Running `drift-status` in any tool shows session history from all sources, so you always see the full picture.
+Running `drift-status` shows recent session history from previous analyses so you can see activity across sessions.
 
 ---
 
@@ -408,7 +502,7 @@ your-repo/
 │
 └── .drift/                      # Auto-gitignored on first drift-start
     ├── config.json              # Session state (max 20 sessions)
-    ├── sessions.json            # CLI session history
+    ├── sessions.json            # Drift CLI session history
     ├── sessions.claude.json     # Claude Code analysis history (max 50)
     ├── sessions.cursor.json     # Cursor analysis history (max 50)
     ├── sessions.codex.json      # Codex analysis history (max 50)
@@ -416,7 +510,9 @@ your-repo/
     └── .env                     # Optional drift-specific env vars
 ```
 
-`CONTEXT.md` and the report file are meant to be committed — they're the artifacts your team reads. Everything in `.drift/` is local-only and never committed.
+`CONTEXT.md` and report files are meant to be committed — they're the artifacts your team reads. Everything in `.drift/` is local-only and never committed.
+
+> The `sessions.json` file (no tool suffix) is the session history for the [drift CLI tool](https://github.com/Hamad-Center/drift), a separate Node.js CLI that also reads the shared `.drift/` directory. The skills in this repo work independently of the CLI — you don't need it installed.
 
 ---
 
@@ -427,26 +523,33 @@ your-repo/
 drift-start BAS-10
 
 # Drift fetches the ticket from Jira automatically.
-# You see: ticket title, AC items, and confirmation that the session started.
+# You see: ticket title, description, and confirmation that the session started.
 
 # ... code with your AI assistant ...
 
 # Curious how much you've changed?
 drift-status
+# Shows commits, files changed, diff stats. Writes nothing.
 
 # ... keep coding ...
 
 # Done for now. Run the full analysis.
 drift-sync
 
-# Drift reads every changed file, compares against the ticket's AC,
-# reviews the code, writes CONTEXT.md, writes bas-10-report.md,
+# Drift reads every changed file, fetches the ticket's AC from Jira,
+# compares what you built vs what the AC says, reviews the code,
+# writes CONTEXT.md, writes bas-10-report.md,
 # and posts a progress comment to BAS-10 in Jira.
+
+# Want to keep coding and re-analyze? Just run drift-sync again.
+# The session stays active until you start a new one.
 
 # Next ticket:
 drift-start BAS-11
 
-# The previous session is archived. A new session begins.
+# Drift asks if you want to replace the BAS-10 session. You say yes.
+# The new session begins. CONTEXT.md still has the BAS-10 analysis
+# in its "Previous Sessions" section.
 ```
 
 ---
@@ -459,12 +562,13 @@ drift-start BAS-11
 | Binary files in the diff | Skipped, noted as "binary file, not analyzed" |
 | A changed file is over 1000 lines | File content skipped, noted as "too large for inline analysis" (diff is still analyzed) |
 | More than 100 changed files | Reads the top 20 files by lines changed, notes the rest in the summary |
-| No planned work description | "Drift from plan" section is omitted entirely — nothing to measure against |
+| No planned work and no Jira AC | "Drift from plan" section is omitted entirely — nothing to measure against |
 | `startSha` no longer exists (after rebase) | Falls back to `git merge-base`, fails gracefully with a clear message if that also fails |
 | Jira API returns an error | Warns you and continues the analysis without ticket context |
 | Jira comment fails to post | Warns you but still writes CONTEXT.md and the report — you don't lose the analysis |
-| Old `CONTEXT.claude.md` exists from before | Automatically renamed to `CONTEXT.md`, previous session history preserved |
-| You run `drift-start` with an active session | Shows the current session and asks if you want to replace it |
+| Old `CONTEXT.claude.md` exists (pre-rename) | Automatically renamed to `CONTEXT.md`, previous session history preserved |
+| You run `drift-start` with an active session | Shows the current session and asks if you want to replace it. If yes, the old session is removed from the active sessions list |
+| You run `drift-sync` and keep coding | Session stays active. Run `drift-sync` again to re-analyze with the new changes |
 
 ---
 
