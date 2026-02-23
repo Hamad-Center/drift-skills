@@ -65,7 +65,9 @@ drift-start BAS-10 implement JWT authentication
 
 If you provide a description, Drift uses that as the `plannedWork` instead of fetching from Jira. If you provide just the ticket ID and Jira is connected, it pulls the ticket details automatically. If Jira isn't configured, just add a short description of what you plan to do.
 
-**Starting a new session when one is already active?** Drift shows you the current session and asks if you want to replace it. If you say yes, the old session is removed from the active session list and the new one takes its place. (The old session's analysis is still preserved in `CONTEXT.md` and `sessions.*.json` if you ran `drift-sync` before starting a new session.)
+**Starting a new session when one is already active?** Drift shows you the current session and asks if you want to replace it. If you say yes, the old session is removed and the new one takes its place. (The old session's analysis is still preserved in `CONTEXT.md` and `sessions.*.json` if you ran `drift-sync` before starting a new one — only the active session pointer in `config.json` is replaced.)
+
+> **How `config.json` sessions work:** The `.drift/config.json` file contains a `sessions` array. The **last element** is always the active session — the one `drift-status` and `drift-sync` operate on. Previous elements are historical session starts (kept for reference, capped at 20). There is only ever one active session at a time.
 
 **First time running Drift?** It creates a `.drift/` folder in your repo (automatically added to `.gitignore`) to store session data and credentials. If Jira isn't configured yet, it offers to collect your credentials interactively and saves them locally in `.drift/jira.json` (never committed).
 
@@ -217,7 +219,7 @@ CONTEXT.md updated | Jira: comment posted to BAS-10
 
 Ready to paste into a PR description or share with the team.
 
-**Important:** `drift-sync` does **not** clear the active session. You can run it multiple times on the same session — useful if you keep coding after a sync and want to re-analyze. The session only ends when you run `drift-start` for a new ticket.
+**Important:** `drift-sync` does **not** clear the active session. You can run it multiple times on the same session — useful if you keep coding after a sync and want to re-analyze. When you re-sync the same session, the "Latest Session" in `CONTEXT.md` is overwritten with the new analysis (it doesn't create a second slot — it replaces). The session only ends when you run `drift-start` for a new ticket.
 
 ---
 
@@ -225,10 +227,12 @@ Ready to paste into a PR description or share with the team.
 
 | Flag | What it does |
 |---|---|
-| `--no-push` | Skip Jira integration entirely — no ticket fetch, no comment posted. The analysis uses your `drift-start` description instead of ticket AC. You still get CONTEXT.md, the report, and session JSON. |
-| `--no-jira` | Same as `--no-push` — skip all Jira integration (no fetch, no post). |
+| `--no-push` | Skip all Jira integration — no ticket fetch, no comment posted. The analysis uses your `drift-start` description instead of ticket AC. You still get CONTEXT.md, the report, and session JSON. |
+| `--no-jira` | Same behavior as `--no-push`. Both flags exist for readability — use whichever reads more naturally to you. |
 
 Use either flag when you want the analysis but don't need Jira involvement — e.g., working offline, tickets aren't set up yet, or you're not ready to post.
+
+> **Note:** There is currently no way to fetch AC from Jira but skip posting the comment. Both flags disable all Jira integration (read and write). If you need the AC-based analysis without posting, run `drift-sync` normally and the Jira comment will post — you can always delete it from the ticket afterward.
 
 ---
 
