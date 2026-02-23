@@ -42,8 +42,8 @@ Deep multi-step analysis of everything that changed since the session started. T
 
 ```
 /drift-sync
-/drift-sync --no-push    # skip Jira comment posting
-/drift-sync --no-jira    # skip all Jira integration (fetch + post)
+/drift-sync --no-push    # skip all Jira integration (no fetch, no post)
+/drift-sync --no-jira    # same as --no-push
 ```
 
 **What it does:**

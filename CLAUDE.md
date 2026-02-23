@@ -142,8 +142,8 @@ drift-skills/
 | 8 | Report | Displays summary, writes `<ticket>-report.md` (lowercase, e.g. `bas-10-report.md`) or `session-report.md` |
 
 **Flags:**
-- `--no-push` — skip Jira comment posting only (still fetches ticket for analysis)
-- `--no-jira` — skip all Jira integration (no fetch, no post)
+- `--no-push` — skip all Jira integration (no fetch, no post). Despite the name, this skips both reading and writing.
+- `--no-jira` — same behavior as `--no-push`. Both flags exist for readability.
 
 ---
 

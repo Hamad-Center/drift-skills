@@ -757,10 +757,10 @@ If you're on BAS-10 and you notice something that belongs to BAS-11, that's not 
 ## Flags & Options
 
 ### `drift-sync --no-push`
-Runs the full analysis — all 8 phases — but skips posting the Jira comment in Phase 7. CONTEXT.md is still written, the report file is still written, session history is still saved. Use when you want the analysis but don't want a half-finished session appearing in Jira.
+Skips all Jira integration — no credential resolution, no ticket fetch in Phase 1b, no comment in Phase 7. The analysis uses `plannedWork` from config instead of ticket AC. CONTEXT.md is still written, the report file is still written, session history is still saved. Use when you want the analysis but don't want Jira involvement.
 
 ### `drift-sync --no-jira`
-Skips all Jira integration entirely — no credential resolution, no ticket fetch in Phase 1b, no comment in Phase 7. The analysis uses `plannedWork` from config instead of ticket AC. Use when working without Jira or when tickets aren't set up.
+Same behavior as `--no-push`. Both flags exist for readability — use whichever reads more naturally to you.
 
 ---
 

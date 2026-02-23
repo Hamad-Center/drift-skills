@@ -53,7 +53,7 @@ drift-start BAS-10
 That's it. Just the ticket ID. The ticket ID is required — Drift will ask for one if you don't provide it.
 
 **What happens behind the scenes:**
-- Drift saves your current git SHA, branch, and timestamp as the starting snapshot
+- Drift saves your current git SHA and timestamp as the starting snapshot (the branch is displayed but not stored — it's read from git at display time)
 - If Jira is configured, it fetches the ticket's **summary and description** to use as context for the session
 - This context is stored as the session's `plannedWork` — the baseline for measuring drift later
 
@@ -219,7 +219,7 @@ CONTEXT.md updated | Jira: comment posted to BAS-10
 
 Ready to paste into a PR description or share with the team.
 
-**Important:** `drift-sync` does **not** clear the active session. You can run it multiple times on the same session — useful if you keep coding after a sync and want to re-analyze. When you re-sync the same session, the "Latest Session" in `CONTEXT.md` is overwritten with the new analysis (it doesn't create a second slot — it replaces). The session only ends when you run `drift-start` for a new ticket.
+**Important:** `drift-sync` does **not** clear the active session. You can run it multiple times on the same session — useful if you keep coding after a sync and want to re-analyze. When you re-sync, the current "Latest Session" in `CONTEXT.md` gets demoted to "Previous Sessions" and the new analysis takes the "Latest Session" slot (so you may see the same ticket appear in both sections — that's expected). The session only ends when you run `drift-start` for a new ticket.
 
 ---
 
@@ -307,7 +307,7 @@ Overall: Clean implementation. Add pagination before dataset grows.
 
 ### `<ticket>-report.md` — Session report
 
-Written to the repo root (e.g., `bas-10-report.md`). A clean, human-readable version of the full analysis including all code review findings (CLEAN, CONCERN, and ISSUE). Overwritten each time you sync the same ticket. Report files from previous tickets are not deleted — if you synced BAS-10 and then BAS-11, both `bas-10-report.md` and `bas-11-report.md` will exist.
+Written to the repo root (e.g., `bas-10-report.md`). A clean, human-readable version of the full analysis. Code review findings list CONCERN and ISSUE individually, with CLEAN shown as a count (e.g., "3 clean | 1 concern | 1 issue"). Overwritten each time you sync the same ticket. Report files from previous tickets are not deleted — if you synced BAS-10 and then BAS-11, both `bas-10-report.md` and `bas-11-report.md` will exist.
 
 Useful as:
 - A PR description (paste it in)
@@ -350,7 +350,7 @@ Each finding includes a file path, line number, and a specific recommendation. E
 ### Where review findings appear
 
 - **`CONTEXT.md`** — CONCERN and ISSUE findings only. CLEAN findings are omitted to keep the document concise as sessions accumulate — you don't need to scroll past 20 "this is fine" entries to find the two things that matter.
-- **`<ticket>-report.md`** — all findings including CLEAN. This is the full picture for the current session.
+- **`<ticket>-report.md`** — CONCERN and ISSUE findings listed individually, CLEAN as a count. Same detail level as what you see in the terminal after sync.
 - **Jira comment** — summary count only (e.g., "1 concern, 1 issue: rate limiting missing"). The ticket doesn't need the full review — just the signal.
 
 ---
