@@ -1,0 +1,491 @@
+---
+name: drift-sync
+description: Deep multi-step analysis of all changes since session start — writes CONTEXT.md, posts to Jira. Supports --no-push and --no-jira flags.
+---
+
+# drift-sync
+
+Perform a deep, multi-step analysis of all code changes since the drift session started. This is the core skill that leverages the full context window and multi-step reasoning — unlike the drift CLI which truncates diffs to 8,000 characters.
+
+**Critical:** This skill does NOT clear the active session, so `drift sync` can run afterward on the same session for side-by-side comparison.
+
+## Instructions
+
+Follow these phases in order:
+
+---
+
+### Phase 1 — Validate session
+
+0. Run `git rev-parse --git-dir` to verify this is a git repository. If not, tell the user and stop.
+1. Read `.drift/config.json`
+2. Verify `initialized` is true. If not, tell the user to run `drift init` or `drift-start` first.
+3. Get the active session — the **last element** of the `sessions` array.
+4. If no active session exists, tell the user to start one with `drift-start` and stop.
+5. Extract: `startSha`, `startedAt`, `ticket`, `plannedWork` from the active session.
+
+---
+
+### Phase 1b — Resolve Jira credentials and fetch ticket context
+
+**Skip this phase entirely if:**
+- The session has no `ticket` value, OR
+- The user's message contains `--no-push` or `--no-jira` (the user wants to skip Jira integration)
+
+#### Credential resolution
+
+Check these sources **in order**, using the first one that provides all three values (`url`, `email`, `token`). Stop checking once a complete set is found.
+
+1. **Environment variables** (shell):
+   ```bash
+   echo "$JIRA_URL"; echo "$JIRA_EMAIL"; echo "$JIRA_TOKEN"
+   ```
+   Use these if all three are set and non-empty.
+
+2. **`.env` file** (project root):
+   Read `.env` in the repo root. Look for `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`.
+
+   Parse `.env` as key=value pairs with these rules:
+   - Ignore blank lines and lines starting with `#`
+   - Strip optional `export ` prefix (e.g., `export JIRA_URL=...` → `JIRA_URL=...`)
+   - Strip surrounding quotes from values (single or double: `JIRA_URL="https://..."` → `https://...`)
+   - Trim trailing whitespace from values
+   - Ignore inline comments after values (e.g., `JIRA_URL=https://foo.net # prod` → `https://foo.net`)
+
+3. **`.drift/.env` file** (drift-specific):
+   Same format and parsing rules as source 2 above, but read from `.drift/.env`. Keeps Jira creds separate from the project's `.env`.
+
+4. **Drift CLI global config**: `~/.config/drift-nodejs/config.json`
+   Read if it exists. Keys are `jiraUrl`, `jiraEmail`, `jiraToken`.
+   This is where `drift config --jira-url/--jira-email/--jira-token` saves credentials.
+
+5. **`.drift/jira.json`** (local project config):
+   Read if it exists. Format: `{"url": "...", "email": "...", "token": "..."}`.
+   This is where the skill saves credentials when the user provides them interactively.
+
+#### If no credentials found
+
+If none of the above sources provide complete Jira credentials, **ask the user**:
+
+> This session has ticket `<ticket>`. Would you like to configure Jira integration?
+> This would let drift fetch ticket context and post session summaries as comments.
+>
+> If yes, I'll need:
+> 1. Jira URL (e.g., https://yourteam.atlassian.net)
+> 2. Jira email
+> 3. Jira API token (from https://id.atlassian.com/manage-profile/security/api-tokens)
+
+If the user provides credentials, save them to `.drift/jira.json`:
+```json
+{
+  "url": "<url>",
+  "email": "<email>",
+  "token": "<token>"
+}
+```
+
+If the user declines, continue without Jira — note "Jira: not configured" and move on.
+
+#### Fetch ticket context
+
+If credentials are available, fetch the ticket to inform the analysis:
+```bash
+curl -s -u "<email>:<token>" \
+  -H "Content-Type: application/json" \
+  "<url>/rest/api/3/issue/<ticket>"
+```
+
+Extract from the JSON response and store as `ticketContext`:
+- `summary` — the ticket title
+- `description` (plain text from the ADF body) — the full ticket description
+- `acceptanceCriteria` — look for AC in these locations (use the first that has content):
+  1. A custom field containing "acceptance" in its name (check `fields` keys)
+  2. A checklist or bullet list within the `description` ADF body
+  3. Subtasks: if the ticket has subtasks (`fields.subtasks`), list their summaries as AC items
+- `status` — the ticket's workflow status
+
+The `ticketContext` — especially the acceptance criteria — is the PRIMARY scoping reference for Phase 4. All progress, drift, and next-steps analysis must be evaluated against this ticket's AC, not the broader project.
+
+If the request fails (non-200 status, network error, etc.), warn the user and continue without ticket context.
+
+---
+
+### Phase 2 — Gather git data
+
+Run these commands using the `startSha` from the active session:
+
+```bash
+git diff --name-only <startSha>
+```
+→ List of all changed files (committed + uncommitted)
+
+```bash
+git diff --stat <startSha>
+```
+→ Diff statistics
+
+```bash
+git log --oneline <startSha>..HEAD
+```
+→ Commit messages since session start
+
+```bash
+git diff <startSha>
+```
+→ Full diff — do NOT truncate this. This is the key advantage over the CLI.
+
+```bash
+git diff --name-only --diff-filter=A <startSha>
+```
+→ Added files
+
+```bash
+git diff --name-only --diff-filter=M <startSha>
+```
+→ Modified files
+
+```bash
+git diff --name-only --diff-filter=D <startSha>
+```
+→ Deleted files
+
+```bash
+git diff --cached --name-only
+```
+→ Staged but uncommitted files (note these separately)
+
+```bash
+git diff --name-only
+```
+→ Unstaged changes (note these separately)
+
+If there are no changes at all (no changed files, no commits), report this and stop.
+
+---
+
+### Phase 3 — Deep file analysis
+
+This is what makes the skill superior to the CLI's truncated single-shot approach.
+
+**For each changed file** (from the changed files list):
+
+1. Skip binary files (images, compiled files, etc. — check with `git diff --numstat <startSha> -- <file>` where binary files show `-` for additions/deletions)
+2. Skip files over 1000 lines — note them in the summary as "too large for inline analysis"
+3. Read the full current content of each remaining file
+
+**If there are more than 100 changed files:**
+- Run `git diff --numstat <startSha>` to get lines-changed counts
+- Read only the top 20 files by total lines changed
+- Note the remaining files in the summary
+
+**For architecturally significant changes** (new modules, API changes, config changes, dependency updates):
+- Read related unchanged files that provide context (e.g., if a new route handler was added, read the router setup file)
+- Search for references to changed functions/classes in unchanged files
+
+**For the largest diffs** (files with >200 lines changed):
+- Examine the per-file diff individually: `git diff <startSha> -- <file>`
+
+---
+
+### Phase 4 — Structured analysis
+
+Based on ALL the data gathered (full diffs, file contents, git history), produce a structured analysis. Be specific — reference actual file paths, function names, line numbers, and concrete details.
+
+**Scoping rule:** Only evaluate against what is EXPLICITLY WRITTEN in the ticket's acceptance criteria or `plannedWork`. Never assume something is required if it is not written. If the AC says "create folder structure" and the folders exist, that AC item is done — even if the folders are empty. If the AC does not mention tests, do not report missing tests as incomplete work. Progress, drift, and next steps are measured ONLY against what the ticket literally asks for. Work from future tickets is out of scope entirely. Do not infer, extrapolate, or add implied requirements.
+
+#### 4a. What happened (3-5 sentences)
+Summarize what was actually implemented. Reference specific file paths and approaches. Be concrete, not vague.
+
+#### 4b. Technical decisions
+List each significant technical decision made during the session:
+- What was decided
+- What alternatives were NOT chosen (if apparent from the code)
+- Which files/functions reflect this decision
+- **Evaluation**: Rate as **SOUND**, **ACCEPTABLE**, or **QUESTIONABLE** with one sentence explaining why
+  - **SOUND** — clearly the right choice given the constraints
+  - **ACCEPTABLE** — reasonable, though alternatives exist
+  - **QUESTIONABLE** — may cause problems; worth reconsidering
+
+#### 4c. Drift from plan
+**Only include this section if `plannedWork` was provided.**
+
+Compare what was planned vs what was implemented:
+- Scope additions (things done that weren't planned in this ticket's AC)
+- Scope reductions (AC items not yet done)
+- Approach changes (planned one way, implemented another)
+
+When `ticketContext` with acceptance criteria is available, use the AC as the authoritative checklist. "Drift" means deviation from what is EXPLICITLY WRITTEN in the AC — not from what a developer might generally expect or assume. If the AC doesn't mention it, it's not drift. Missing components that belong to future tickets are NOT drift.
+
+If everything matches the plan, say so explicitly.
+
+#### 4d. Architecture impact
+Identify structural/architectural implications:
+- New patterns introduced
+- Dependency changes (new packages, removed packages)
+- API surface changes (new endpoints, changed interfaces)
+- New files/modules and their role in the architecture
+- Changes that affect other parts of the codebase
+
+#### 4e. For next session
+Specific, actionable items for continuing this work:
+
+When `ticketContext` is available, organize into two groups:
+1. **Remaining ticket work** — unfinished AC items from THIS ticket, with file paths
+2. **Future work (out of scope)** — things noticed that belong to other tickets or the broader project; list briefly but label clearly as out of scope
+
+Always include regardless of ticket context:
+- TODOs found in the code (search for `TODO`, `FIXME`, `HACK` in changed files)
+- Tests that need to be written for the work done in this session
+- Known issues or edge cases in the implemented code
+
+#### 4f. Ticket comment
+A structured Jira comment with labeled sections separated by double newlines (`\n\n`). Format it exactly like this:
+
+```
+Drift Session Summary (Codex analysis):
+
+Progress: ~X% of this ticket's acceptance criteria
+
+What was done:
+<1-2 sentences, business-level, scoped to this ticket>
+
+Drift from plan:
+<scope changes vs this ticket's AC, or "None">
+
+Code quality:
+<N concerns, M issues: top finding> or "No concerns"
+
+Next steps:
+- <remaining AC items from THIS ticket only>
+
+Blockers:
+- <blocker or omit this section entirely if none>
+```
+
+**Scoping rules for this comment:**
+- **Progress %** = (completed AC items / total AC items) for THIS ticket. Only count items EXPLICITLY WRITTEN in the AC. Do not factor in future tickets, overall project completion, or implied requirements.
+- **What was done** = only work that addresses THIS ticket's AC.
+- **Next steps** = only remaining AC items EXPLICITLY WRITTEN in THIS ticket. Do NOT list work from future tickets. Do NOT invent requirements that aren't in the AC.
+- If `ticketContext` is not available, estimate progress against `plannedWork` instead — same rule: only what is literally written.
+
+Each section heading must be on its own line, followed by the content on the next line(s). Separate each section with a blank line. Keep it concise — focus on business-level impact, not implementation details.
+
+#### 4g. Code & architecture review
+
+This section is EVALUATIVE — every finding must include a judgment and a file path. Review all changed code from Phase 3 and produce findings.
+
+**Signal labels** (every finding gets exactly one):
+- **CLEAN** — good practice, no action needed
+- **CONCERN** — not wrong but worth watching; may become a problem
+- **ISSUE** — should be fixed; creates real risk (security, correctness, maintainability)
+
+**Categories** (omit any category with no findings):
+
+1. **Approach validation** — Was this the right way to solve the problem? Are there simpler alternatives that were missed?
+2. **Hacky patterns** — Quick-and-dirty code, magic numbers, tight coupling, workarounds, copy-paste duplication
+3. **Best practices** — Framework/language idiom adherence, naming conventions, error handling patterns
+4. **Architecture soundness** — Right level of abstraction? Over-engineered or under-engineered? Speculative generalization?
+5. **Security concerns** — Hardcoded secrets, auth gaps, missing input validation, injection risks, sensitive data exposure
+6. **Potential issues** — Race conditions, missing error handling, performance bottlenecks, resource leaks, edge cases
+
+**Format each finding as:**
+```
+- <SIGNAL>: <finding description> (<file_path>:<line>) — <evaluation/recommendation>
+```
+
+**Overall assessment** (required) — 1-3 sentences: the single most important thing to fix, the single most important thing done well, and overall quality judgment.
+
+**Rules:**
+- Be specific — reference file paths, function names, and line numbers
+- Include at least one CLEAN finding when good practices are present (acknowledge what's done well)
+- Do not pad with trivial findings — only include what matters
+- If the code is uniformly good, say so in the overall assessment and include only CLEAN findings
+
+---
+
+### Phase 5 — Write CONTEXT.md
+
+Write the file `CONTEXT.md` in the repository root. Use this exact structure:
+
+```markdown
+# Project Context
+
+> This file is auto-generated by drift (Codex skill). It provides deep analysis of recent changes.
+> Last updated: <ISO 8601 timestamp>
+> Analysis method: codex-full-context (no truncation, multi-step file analysis)
+
+# Latest Session
+
+## Session: <YYYY-MM-DD> (<ticket or omit parenthetical if none>)
+
+**What happened:**
+<what happened text>
+
+**Decisions made:**
+- <decision 1>
+- <decision 2>
+...
+
+**Drift from plan:**
+- <drift item 1>
+- <drift item 2>
+...
+
+**Architecture impact:**
+- <impact item 1>
+- <impact item 2>
+...
+
+**Code review:**
+- <signal>: <finding with file path> — <evaluation>
+...
+Overall: <assessment>
+
+**For next session:**
+- <item 1>
+- <item 2>
+...
+
+# Previous Sessions
+
+<up to 4 previous sessions from the old CONTEXT.md, if it exists>
+```
+
+Rules for this file:
+- **Migration**: If `CONTEXT.md` does not exist but `CONTEXT.claude.md` does, rename `CONTEXT.claude.md` to `CONTEXT.md` first (using `mv`), then proceed with the normal update logic. This preserves previous session history after the filename change.
+- If `CONTEXT.md` already exists, extract previous sessions (sections starting with `## Session:`) and keep up to 4 of them under "# Previous Sessions"
+- Omit the "Drift from plan" section entirely if there was no `plannedWork`
+- Omit any section that would be empty
+- Separate previous sessions with `---`
+- **Code review section**: Only include CONCERN and ISSUE findings (omit CLEAN to keep it concise). Always include the "Overall" line. Omit the section entirely if all findings are CLEAN.
+
+---
+
+### Phase 6 — Write .drift/sessions.codex.json
+
+Read `.drift/sessions.codex.json` if it exists (it's an array). Prepend a new entry to the beginning of the array:
+
+```json
+{
+  "date": "<session startedAt ISO timestamp>",
+  "ticket": "<ticket or null>",
+  "startSha": "<startSha>",
+  "endSha": "<current HEAD SHA>",
+  "summary": "<whatHappened text>",
+  "decisions": ["<decision 1>", "<decision 2>"],
+  "drift": ["<drift item 1>", "<drift item 2>"],
+  "architectureImpact": ["<impact 1>", "<impact 2>"],
+  "forNextSession": ["<item 1>", "<item 2>"],
+  "ticketComment": "<ticket comment text>",
+  "codeReview": {
+    "findings": [
+      {"signal": "CONCERN", "category": "security", "file": "path", "finding": "desc", "recommendation": "fix"}
+    ],
+    "overall": "assessment text",
+    "counts": {"clean": 0, "concern": 0, "issue": 0}
+  },
+  "analysisMethod": "codex-full-context",
+  "filesAnalyzed": <number of files actually read>,
+  "totalFilesChanged": <total number of changed files>,
+  "jiraCommentPosted": <true if comment was posted, false otherwise>
+}
+```
+
+Keep a maximum of 50 entries. Write with 2-space indentation.
+
+---
+
+### Phase 7 — Post to Jira (if configured)
+
+**Skip this phase if:**
+- There's no `ticket`, OR
+- Jira credentials were not resolved in Phase 1b, OR
+- The user's message contains `--no-push` or `--no-jira`
+
+Use the credentials resolved in Phase 1b (they're already available — don't re-prompt).
+
+1. Post the `ticketComment` from Phase 4f as a comment on the Jira ticket:
+   ```bash
+   curl -s -w "\n%{http_code}" -u "<email>:<token>" \
+     -X POST \
+     -H "Content-Type: application/json" \
+     -d '{
+       "body": {
+         "type": "doc",
+         "version": 1,
+         "content": [
+           {
+             "type": "paragraph",
+             "content": [
+               {
+                 "type": "text",
+                 "text": "Drift Session Summary (Codex analysis):\n\n<ticketComment text>"
+               }
+             ]
+           }
+         ]
+       }
+     }' \
+     "<url>/rest/api/3/issue/<ticket>/comment"
+   ```
+2. The comment body uses Atlassian Document Format (ADF) — the same format the drift CLI uses (`jira.ts:56-70`).
+3. Check the HTTP status code. If 2xx, mark `jiraCommentPosted: true`. If it fails, warn the user but do NOT fail the sync.
+4. If Jira is not configured or no ticket exists, skip silently and set `jiraCommentPosted: false`.
+
+---
+
+### Phase 8 — Report to user
+
+Display a clear summary to the user AND write it to a markdown file.
+
+**Report content:**
+
+```
+Drift sync complete (Codex deep analysis)
+
+What happened:
+  <what happened summary>
+
+Decisions:
+  - <decision 1>
+  - <decision 2>
+
+Drift from plan:
+  - <drift item>
+
+Architecture impact:
+  - <impact item>
+
+Code review:
+  N clean | N concerns | N issues
+  - CONCERN: <finding>
+  - ISSUE: <finding>
+  Overall: <assessment>
+
+For next session:
+  - <item>
+
+---
+Files changed: <N> | Commits: <N> | Files analyzed: <N>
+CONTEXT.md updated
+Jira: <"comment posted to <ticket>" or "not configured" or "no ticket">
+```
+
+**Write report file:** Write the same report content above as a markdown file in the repository root:
+- Filename: `<ticket>-report.md` if a ticket exists (e.g., `bas-11-report.md`), or `session-report.md` if no ticket
+- Use the ticket ID in lowercase (e.g., `bas-11-report.md`)
+- Overwrite if the file already exists (each sync produces a fresh report)
+
+**Remind the user:** The session is still active. They can run `drift-start` again when they're ready to begin a new session.
+
+---
+
+## Edge Cases
+
+- **Binary files**: Skip reading them. Note them as "binary file, not analyzed" in the summary.
+- **>100 changed files**: Only read the top 20 by lines changed. Note: "Analyzed 20 of N changed files (by lines changed)."
+- **No plannedWork**: Omit the "Drift from plan" section entirely — do not include it with "N/A" or empty text.
+- **Uncommitted changes**: Include them in the analysis. Note which changes are committed vs uncommitted.
+- **Deleted files**: Don't try to read them (they don't exist). Note them as deleted.
+- **Empty diff**: If there are no changes, report "No changes since session start" and stop without writing files.
+- **Missing startSha**: If the startSha no longer exists in git history (e.g., after a rebase), try `git merge-base HEAD <startSha>` as a fallback. If that also fails, tell the user.
