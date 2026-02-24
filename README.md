@@ -608,3 +608,15 @@ Behavior is identical across all three. Only invocation, file format, and labels
 ## Full Documentation
 
 For the complete technical reference — every phase of `drift-sync` in full detail, the complete data model, all scoping rules with rationale, and the design decisions behind each choice — see [DRIFT_DOCS_DETAILED.md](docs/DRIFT_DOCS_DETAILED.md).
+
+---
+
+## Acknowledgments
+
+This project was inspired by [Drift](https://github.com/Mersall/drift) by [@Mersall](https://github.com/Mersall). Thank you for the original idea and foundation.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
