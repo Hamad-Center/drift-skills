@@ -1,0 +1,58 @@
+---
+description: Assign Jira tickets to people from natural language. Trigger by typing "radwan-jira-assign" followed by what to assign and to whom.
+globs:
+alwaysApply: false
+---
+
+# radwan-jira-assign
+
+Assign Jira tickets to team members from free-form input. Understands natural language, ticket keys, names, and bulk operations.
+
+## Instructions
+
+When the user triggers `radwan-jira-assign`, follow these steps:
+
+### Step 1: Resolve Jira credentials
+
+Check in order: shell env vars (`JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`) → `.env` → `.drift/.env` → `.drift/jira.json`. Use first complete set.
+
+### Step 2: Parse the input
+
+Parse the user's message to extract assignment instructions. **Any format is valid:**
+
+- `JH-47, JH-21 to fares` — direct ticket keys
+- `assign the TV scraper tickets to fares` — by description
+- `assign all QA tickets to radwan` — by type filter
+- `assign all unassigned in EPIC 1 to ahmed` — by epic + filter
+- `unassign JH-15` — remove assignee
+
+### Step 3: Resolve tickets and people
+
+**Resolve ticket keys** if referenced by name — search via JQL:
+```bash
+curl -s -X POST -u "<email>:<token>" -H "Content-Type: application/json" \
+  -d '{"jql":"project=<KEY> AND summary ~ \"<text>\"","maxResults":10,"fields":["summary","assignee","parent"]}' \
+  "<url>/rest/api/3/search/jql"
+```
+
+**Resolve names to account IDs:**
+```bash
+curl -s -u "<email>:<token>" "<url>/rest/api/3/user/search?query=<name>"
+```
+
+### Step 4: Confirm, then assign
+
+Show what will change, ask for confirmation, then execute:
+
+```bash
+curl -s -X PUT -u "<email>:<token>" -H "Content-Type: application/json" \
+  -d '{"accountId":"<id>"}' "<url>/rest/api/3/issue/<key>/assignee"
+```
+
+To unassign, use `{"accountId":null}`.
+
+If assignment fails with "cannot be assigned", the user needs to be added as a project Member.
+
+### Step 5: Report results
+
+Show each assignment result with ticket key and status.

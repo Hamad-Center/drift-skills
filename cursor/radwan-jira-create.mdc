@@ -1,0 +1,112 @@
+---
+description: Create Jira tickets and epics from any format — markdown, lists, tables, or plain text. Trigger by typing "radwan-jira-create" followed by the tickets to create.
+globs:
+alwaysApply: false
+---
+
+# radwan-jira-create
+
+Create Jira issues (epics, stories, tasks, bugs) from free-form input. The input can be any format — structured markdown, bullet lists, tables, JSON, or plain English. You are an LLM — parse and understand the intent.
+
+## Instructions
+
+When the user triggers `radwan-jira-create`, follow these steps:
+
+### Step 1: Resolve Jira credentials
+
+Check these sources **in order**. Use the first complete set (url, email, token):
+
+1. **Shell env vars**: `$JIRA_URL`, `$JIRA_EMAIL`, `$JIRA_TOKEN`
+2. **`.env`** in project root — parse as key=value (handle `export` prefix, quotes, inline comments)
+3. **`.drift/.env`** — same parsing rules
+4. **`.drift/jira.json`** — `{"url", "email", "token"}`
+
+If no credentials found, ask the user to provide them. Offer to save to `.drift/jira.json`.
+
+### Step 2: Resolve the Jira project
+
+Check if the user's message specifies a project key. If not:
+
+1. Check `.drift/jira-config.json` for a saved `projectKey`
+2. Fetch all projects: `curl -s -u "<email>:<token>" "<url>/rest/api/3/project"`
+3. List them and ask the user to pick one
+4. Save the choice to `.drift/jira-config.json`: `{"projectKey": "XX"}`
+
+### Step 3: Discover project capabilities
+
+Fetch issue types: `curl -s -u "<email>:<token>" "<url>/rest/api/3/project/<key>"`
+
+Extract available issue type names and IDs. Key fields to detect:
+- `timetracking` → use `{"originalEstimate": "2h"}` for estimates
+- `customfield_10016` → story points — fallback for estimates
+
+### Step 4: Parse the user's input
+
+Parse the user's message to extract tickets. **Any format is valid.** Identify:
+
+- **Epics** — grouping containers (headers, "Epic" labels, hierarchy)
+- **Tickets** — individual work items with:
+  - **Title** (required)
+  - **Type** — Story, Task, Bug, etc. Map unsupported types to Task
+  - **Estimate** — "2h", "1d", "3 days", "half day", "TBD"
+  - **Description/Summary** — additional context
+  - **Acceptance criteria** — bullet points, numbered lists
+  - **Dependencies** — references to other tickets
+  - **Labels/Tags** — categorization hints
+  - **Assignee** — resolve name to accountId via `<url>/rest/api/3/user/search?query=<name>`
+  - **Status** — if marked done, transition after creation
+
+### Step 5: Confirm before creating
+
+Show the user a summary of what will be created and ask for confirmation.
+
+### Step 6: Create issues via API
+
+Create in order: **epics first**, then child tickets.
+
+**Create issue:**
+```bash
+curl -s -X POST -u "<email>:<token>" -H "Content-Type: application/json" -d '<payload>' "<url>/rest/api/3/issue"
+```
+
+**Payload:**
+```json
+{
+  "fields": {
+    "project": {"key": "<KEY>"},
+    "summary": "<title>",
+    "issuetype": {"id": "<type_id>"},
+    "parent": {"key": "<epic_key>"},
+    "description": {"version":1,"type":"doc","content":[...]},
+    "labels": ["<label>"]
+  }
+}
+```
+
+**Set estimates** (separate PUT):
+```bash
+curl -s -X PUT -u "<email>:<token>" -H "Content-Type: application/json" \
+  -d '{"fields":{"timetracking":{"originalEstimate":"<est>"}}}' "<url>/rest/api/3/issue/<key>"
+```
+Fallback to `customfield_10016` if timetracking fails.
+
+**Transition done tickets:**
+```bash
+curl -s -u "<email>:<token>" "<url>/rest/api/3/issue/<key>/transitions"
+# Find Done transition, then:
+curl -s -X POST -u "<email>:<token>" -H "Content-Type: application/json" \
+  -d '{"transition":{"id":"<done_id>"}}' "<url>/rest/api/3/issue/<key>/transitions"
+```
+
+### Step 7: Report results
+
+Show created tickets with keys, titles, and any failures.
+
+---
+
+## API Notes
+
+- **Search (new):** `POST <url>/rest/api/3/search/jql` with `{"jql":"...","fields":[...]}`
+- **ADF format** required for descriptions in API v3
+- **Time format:** "1h", "2h", "1d" (1d = 8h, 1w = 5d)
+- **Estimate priority:** timetracking.originalEstimate → customfield_10016
