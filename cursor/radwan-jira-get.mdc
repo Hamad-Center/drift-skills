@@ -1,0 +1,81 @@
+---
+description: Search, read, and list Jira tickets — backlog, sprints, epics, or specific issues. Trigger by typing "radwan-jira-get" followed by what you want to see.
+globs:
+alwaysApply: false
+---
+
+# radwan-jira-get
+
+Read and search Jira tickets. View individual tickets, list backlogs, browse epics, search by text, filter by status/type/assignee, and show sprints.
+
+## Instructions
+
+When the user triggers `radwan-jira-get`, follow these steps:
+
+### Step 1: Resolve Jira credentials
+
+Check in order: shell env vars (`JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`) → `.env` → `.drift/.env` → `.drift/jira.json`. Use first complete set.
+
+### Step 2: Parse the query
+
+Understand what the user wants. **Any format is valid:**
+
+- `JH-47` — single ticket detail
+- `show backlog` — all non-sprint tickets
+- `show EPIC 1 tickets` — children of an epic
+- `find all QA tickets` — filter by type
+- `tickets assigned to fares` — filter by assignee
+- `what's done?` — filter by status
+- `current sprint` — sprint board
+- `project overview` — stats summary
+
+### Step 3: Execute queries
+
+**Single ticket:**
+```bash
+curl -s -u "<email>:<token>" "<url>/rest/api/3/issue/<KEY>?fields=summary,status,assignee,issuetype,parent,description,timetracking,labels,created,updated"
+```
+
+**Search/list via JQL:**
+```bash
+curl -s -X POST -u "<email>:<token>" -H "Content-Type: application/json" \
+  -d '{"jql":"<query>","maxResults":100,"fields":["summary","status","assignee","issuetype","parent","timetracking","labels"]}' \
+  "<url>/rest/api/3/search/jql"
+```
+
+Common JQL:
+- Backlog: `project=<KEY> AND sprint is EMPTY AND status != Done ORDER BY rank`
+- Epic children: `project=<KEY> AND parent=<EPIC_KEY> ORDER BY rank`
+- By type: `project=<KEY> AND issuetype=Story`
+- By assignee: `project=<KEY> AND assignee="<accountId>"`
+- By status: `project=<KEY> AND status="Done"`
+- Unassigned: `project=<KEY> AND assignee is EMPTY`
+- Text search: `project=<KEY> AND summary ~ "<text>"`
+- Current sprint: `project=<KEY> AND sprint in openSprints()`
+
+**Board/sprint:**
+```bash
+curl -s -u "<email>:<token>" "<url>/rest/agile/1.0/board?projectKeyOrId=<KEY>"
+curl -s -u "<email>:<token>" "<url>/rest/agile/1.0/board/<boardId>/sprint?state=active"
+```
+
+### Step 4: Format results
+
+Adapt format to what was queried:
+- **Single ticket** → full detail with description, AC, status, assignee
+- **List** → compact table grouped by epic with key, title, type, estimate, status, assignee
+- **Stats** → counts by status, assignee, type; total estimated hours
+
+### Step 5: Suggest follow-ups
+
+- After backlog: "Use `radwan-jira-assign` to assign or `radwan-jira-create` to add tickets"
+- After ticket view: "Use `radwan-jira-assign <key> to <name>` to assign"
+
+---
+
+## ADF Description Parsing
+
+API v3 returns descriptions in ADF format. To display:
+- Walk `content` array recursively, concatenate `text` nodes
+- `bulletList` → markdown bullets
+- `heading` → markdown headers
